@@ -14,10 +14,46 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-//TODO enum for log levels
-
 // Log levels
 var logLevels = []string{"INFO", "DEBUG", "ERROR", "WARN"}
+
+type LogLevel string
+
+const (
+	Info    LogLevel = "info"
+	Debug   LogLevel = "debug"
+	Warning LogLevel = "warn"
+	Error   LogLevel = "error"
+)
+
+type kafkaTopic struct {
+	isEnabled  bool
+	connection *kafka.Conn
+}
+
+var infoConnection, _ = connect("info-log-topic", 0)
+var debugConnection, _ = connect("debug-log-topic", 0)
+var warnConnection, _ = connect("warn-log-topic", 0)
+var errorConnection, _ = connect("error-log-topic", 0)
+
+var logLevelToTopic = map[LogLevel]kafkaTopic{
+	Info: {
+		isEnabled:  false,
+		connection: infoConnection,
+	},
+	Debug: {
+		isEnabled:  false,
+		connection: debugConnection,
+	},
+	Warning: {
+		isEnabled:  false,
+		connection: warnConnection,
+	},
+	Error: {
+		isEnabled:  false,
+		connection: errorConnection,
+	},
+}
 
 // Sample messages with placeholders
 var possibleMessages = []string{
@@ -42,9 +78,6 @@ var (
 	warnTopicInList  bool
 	errorTopicInList bool
 )
-
-//TODO struct definition for kafka-topic
-//TODO map enum[kafka-topic] for kafka-topic
 
 type messageEntry struct {
 	LogLevel string `json:"level"`
@@ -98,7 +131,7 @@ func main() {
 	}
 
 	<-ctx.Done()
-	slog.Info("Server shutdown!")
+	slog.Info("Producer shutdown!")
 }
 
 // TODO Refactor with map enum[kafka-topic]

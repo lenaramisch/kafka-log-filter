@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
+	"os/signal"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/segmentio/kafka-go"
@@ -29,6 +30,9 @@ type messageEntry struct {
 
 // TODO Keep polling
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	p := tea.NewProgram(initialModel())
 	m, err := p.Run()
 	if err != nil {
@@ -49,13 +53,16 @@ func main() {
 		}
 	}
 
-	messageEntries, _ := readWithReader(topic, "consumer-through-kafka 1")
+	messageEntries, _ := readWithReader(topic, "consumer-through-kafka 1", ctx)
 	if messageEntries != nil {
 		fmt.Printf("Got %v log messages", len(messageEntries))
 	}
+
+	<-ctx.Done()
+	slog.Info("Consumer shutdown!")
 }
 
-func readWithReader(topic string, groupID string) ([]*messageEntry, error) {
+func readWithReader(topic string, groupID string, ctx context.Context) ([]*messageEntry, error) {
 	slog.With("topic", topic).Info("Trying to read messages...")
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:  []string{"localhost:9092", "localhost:9093", "localhost:9094"},
@@ -66,16 +73,11 @@ func readWithReader(topic string, groupID string) ([]*messageEntry, error) {
 	})
 
 	//Create a deadline
-	//TODO Maybe context instead of deadline?
-	readDeadline, cancel := context.WithDeadline(context.Background(),
-		time.Now().Add(5*time.Second))
-	defer cancel()
 
 	var messageEntries []*messageEntry
 	for {
-		msg, err := r.ReadMessage(readDeadline)
+		msg, err := r.ReadMessage(ctx)
 		if string(msg.Value) == "" {
-			slog.Info("No more messages")
 			break
 		}
 		slog.With("msg", msg.Value).Info("Got a new message!")
