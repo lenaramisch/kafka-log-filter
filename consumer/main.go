@@ -8,106 +8,112 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/segmentio/kafka-go"
 )
 
 type model struct {
-	choices  []string
-	cursor   int
-	selected map[int]struct{}
+	choices           []string
+	cursor            int
+	ctx               context.Context
+	isShowingConsumer bool
 }
-
-var (
-	topic string
-)
 
 type messageEntry struct {
 	LogLevel string `json:"level"`
 	Message  string `json:"msg"`
 }
 
+var (
+	topicMap = map[int]string{
+		0: "info-log-topic",
+		1: "debug-log-topic",
+		2: "warn-log-topic",
+		3: "error-log-topic",
+	}
+	counter int
+)
+
 // TODO Keep polling
 func main() {
+	// write logs to file
+	file, err := os.OpenFile("logs.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		panic(err)
+	}
+	logger := slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{
+		AddSource: true,
+		Level:     slog.LevelDebug,
+	}))
+
+	slog.SetDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	p := tea.NewProgram(initialModel())
-	m, err := p.Run()
+	p := tea.NewProgram(initialModel(ctx))
+	_, err = p.Run()
 	if err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)
 	}
 
-	for i := range m.(model).selected {
-		switch m.(model).choices[i] {
-		case "Show INFO log messages":
-			topic = "info-log-topic"
-		case "Show DEBUG log messages":
-			topic = "debug-log-topic"
-		case "Show WARNING log messages":
-			topic = "warn-log-topic"
-		case "Show ERROR log messages":
-			topic = "error-log-topic"
-		}
-	}
-
-	messageEntries, _ := readWithReader(topic, "consumer-through-kafka 1", ctx)
-	if messageEntries != nil {
-		fmt.Printf("Got %v log messages", len(messageEntries))
-	}
-
-	<-ctx.Done()
-	slog.Info("Consumer shutdown!")
+	slog.With("messages", counter).Info("Shutting down app, got messages")
 }
 
-func readWithReader(topic string, groupID string, ctx context.Context) ([]*messageEntry, error) {
+func (m *model) handleChoice() {
+	m.isShowingConsumer = true
+	topic := topicMap[m.cursor]
+	m.Update(tea.ClearScreen())
+	go readWithReader(topic, "consumer-through-kafka 1", m.ctx, &counter)
+}
+
+func readWithReader(topic string, groupID string, ctx context.Context, counter *int) {
 	slog.With("topic", topic).Info("Trying to read messages...")
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  []string{"localhost:9092", "localhost:9093", "localhost:9094"},
-		GroupID:  groupID,
-		Topic:    topic,
-		MaxBytes: 100, //per message
+		Brokers: []string{"localhost:9092"},
+		GroupID: groupID,
+		Topic:   topic,
 		// more options are available
+		MaxWait: 200 * time.Millisecond,
 	})
 
 	//Create a deadline
-
-	var messageEntries []*messageEntry
 	for {
 		msg, err := r.ReadMessage(ctx)
 		if string(msg.Value) == "" {
 			break
 		}
-		slog.With("msg", msg.Value).Info("Got a new message!")
+		slog.Info(string(msg.Value))
 		if err != nil {
 			if err == context.DeadlineExceeded {
 				break
 			}
-			return nil, err
+			panic(err)
 		}
 
 		var newMessageEntry messageEntry
 		json.Unmarshal(msg.Value, &newMessageEntry)
-		messageEntries = append(messageEntries, &newMessageEntry)
+		*counter++
 	}
 
 	if err := r.Close(); err != nil {
 		fmt.Println("failed to close reader:", err)
 	}
-
-	return messageEntries, nil
+	fmt.Println("Closed Kafka Reader")
 }
 
-func initialModel() model {
+func initialModel(ctx context.Context) model {
 	return model{
-		choices: []string{"Show INFO log messages", "Show DEBUG log messages", "Show WARNING log messages", "Show ERROR log messages"},
-
-		// A map which indicates which choices are selected. We're using
-		// the  map like a mathematical set. The keys refer to the indexes
-		// of the `choices` slice, above.
-		selected: make(map[int]struct{}),
+		choices: []string{
+			"Show INFO log messages",
+			"Show DEBUG log messages",
+			"Show WARNING log messages",
+			"Show ERROR log messages",
+		},
+		ctx: ctx,
 	}
 }
 
@@ -118,7 +124,6 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-
 	// Is it a key press?
 	case tea.KeyMsg:
 
@@ -127,7 +132,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// These keys should exit the program.
 		case "ctrl+c", "q":
-			os.Exit(0)
+			return m, tea.Quit
 
 		// The "up" and "k" keys move the cursor up
 		case "up", "k":
@@ -141,18 +146,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 
-		// The "enter" key and the spacebar (a literal space) toggle
-		// the selected state for the item that the cursor is pointing at.
-		case " ":
-			_, ok := m.selected[m.cursor]
-			if ok {
-				delete(m.selected, m.cursor)
-			} else {
-				m.selected[m.cursor] = struct{}{}
-			}
-
 		case "enter":
-			return m, tea.Quit
+			if !m.isShowingConsumer {
+				m.handleChoice()
+			}
+			return m, nil
 		}
 	}
 
@@ -162,6 +160,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.isShowingConsumer {
+		return ""
+	}
 	// The header
 	s := "Which log level do you want to check for?\n\n"
 
@@ -174,14 +175,8 @@ func (m model) View() string {
 			cursor = ">" // cursor!
 		}
 
-		// Is this choice selected?
-		checked := " " // not selected
-		if _, ok := m.selected[i]; ok {
-			checked = "x" // selected!
-		}
-
 		// Render the row
-		s += fmt.Sprintf("%s [%s] %s\n", cursor, checked, choice)
+		s += fmt.Sprintf("%s %s\n", cursor, choice)
 	}
 
 	// The footer

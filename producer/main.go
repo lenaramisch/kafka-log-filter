@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -15,8 +14,8 @@ import (
 )
 
 type messageEntry struct {
-	LogLevel string `json:"level"`
-	Message  string `json:"msg"`
+	LogLevel LogLevel `json:"level"`
+	Message  string   `json:"msg"`
 }
 
 type LogLevel string
@@ -51,23 +50,19 @@ var possibleMessages = []string{
 }
 
 // Log levels for sample logs
-var logLevels = []string{"INFO", "DEBUG", "ERROR", "WARN"}
+var logLevels = []LogLevel{Info, Debug, Error, Warning}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	//Generate 5 messages
-	messages := createRandomMessages(5)
-
-	//Convert message into messageEntry and write to topic accordingly
-	for _, msg := range messages {
-		newMessageEntry := new(messageEntry)
-		json.Unmarshal([]byte(msg), &newMessageEntry)
-		writeMessageToTopic(LogLevel(newMessageEntry.LogLevel), msg)
-	}
+	go generateLogMessages()
 
 	<-ctx.Done()
+	infoConnection.Close()
+	debugConnection.Close()
+	warnConnection.Close()
+	errorConnection.Close()
 	slog.Info("Producer shutdown!")
 }
 
@@ -81,59 +76,55 @@ func connect(topic string, partition int) (*kafka.Conn, error) {
 	return conn, err
 }
 
-func writeMessageToTopic(logLevel LogLevel, msg string) {
+func generateLogMessages() {
+	for {
+		message := createRandomMessage()
+		writeMessageToTopic(message.LogLevel, message)
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func writeMessageToTopic(logLevel LogLevel, msg messageEntry) {
 	conn := connectionsByLogLevel[logLevel]
-	var msgArray []string
-	msgArray = append(msgArray, msg)
 	var err error
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-
-	for _, msg := range msgArray {
-		_, err = conn.WriteMessages(
-			kafka.Message{Value: []byte(msg)})
-	}
+	_, err = conn.WriteMessages(kafka.Message{Value: []byte(msg.Message)})
 	if err != nil {
 		slog.With("err", err).Error("Writing messages failed")
 	}
 }
 
-func createRandomMessages(amount int) []string {
-	var messages []string
-	for i := 0; i < amount; i++ {
-		rand.Seed(time.Now().UnixNano())
+func createRandomMessage() messageEntry {
+	rand.Seed(time.Now().UnixNano())
 
-		// Select a random log level
-		level := logLevels[rand.Intn(len(logLevels))]
+	// Select a random log level
+	level := logLevels[rand.Intn(len(logLevels))]
 
-		// Select a random message template
-		msgTemplate := possibleMessages[rand.Intn(len(possibleMessages))]
+	// Select a random message template
+	msgTemplate := possibleMessages[rand.Intn(len(possibleMessages))]
 
-		// Generate random values based on the message type
-		var logMessage string
-		switch msgTemplate {
-		case "User %d logged in":
-			logMessage = fmt.Sprintf(msgTemplate, rand.Intn(1000))
-		case "Connection to %s failed":
-			logMessage = fmt.Sprintf(msgTemplate, []string{"DB", "API", "Cache"}[rand.Intn(3)])
-		case "Task completed in %dms":
-			logMessage = fmt.Sprintf(msgTemplate, rand.Intn(5000))
-		case "Array values: %v":
-			arr := []int{rand.Intn(10), rand.Intn(10), rand.Intn(10)}
-			logMessage = fmt.Sprintf(msgTemplate, arr)
-		case "Cache hit ratio: %.2f":
-			logMessage = fmt.Sprintf(msgTemplate, rand.Float64()*100)
-		case "Service %s restarted":
-			logMessage = fmt.Sprintf(msgTemplate, []string{"Auth", "Payment", "Search"}[rand.Intn(3)])
-		}
-
-		newMessageEntry := messageEntry{
-			LogLevel: level,
-			Message:  logMessage,
-		}
-
-		jsonMessage, _ := json.Marshal(newMessageEntry)
-
-		messages = append(messages, string(jsonMessage))
+	// Generate random values based on the message type
+	var logMessage string
+	switch msgTemplate {
+	case "User %d logged in":
+		logMessage = fmt.Sprintf(msgTemplate, rand.Intn(1000))
+	case "Connection to %s failed":
+		logMessage = fmt.Sprintf(msgTemplate, []string{"DB", "API", "Cache"}[rand.Intn(3)])
+	case "Task completed in %dms":
+		logMessage = fmt.Sprintf(msgTemplate, rand.Intn(5000))
+	case "Array values: %v":
+		arr := []int{rand.Intn(10), rand.Intn(10), rand.Intn(10)}
+		logMessage = fmt.Sprintf(msgTemplate, arr)
+	case "Cache hit ratio: %.2f":
+		logMessage = fmt.Sprintf(msgTemplate, rand.Float64()*100)
+	case "Service %s restarted":
+		logMessage = fmt.Sprintf(msgTemplate, []string{"Auth", "Payment", "Search"}[rand.Intn(3)])
 	}
-	return messages
+
+	newMessageEntry := messageEntry{
+		LogLevel: level,
+		Message:  logMessage,
+	}
+
+	return newMessageEntry
 }
