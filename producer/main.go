@@ -14,45 +14,30 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-// Log levels
-var logLevels = []string{"INFO", "DEBUG", "ERROR", "WARN"}
+type messageEntry struct {
+	LogLevel string `json:"level"`
+	Message  string `json:"msg"`
+}
 
 type LogLevel string
 
 const (
-	Info    LogLevel = "info"
-	Debug   LogLevel = "debug"
-	Warning LogLevel = "warn"
-	Error   LogLevel = "error"
+	Info    LogLevel = "INFO"
+	Debug   LogLevel = "DEBUG"
+	Warning LogLevel = "WARN"
+	Error   LogLevel = "ERROR"
 )
-
-type kafkaTopic struct {
-	isEnabled  bool
-	connection *kafka.Conn
-}
 
 var infoConnection, _ = connect("info-log-topic", 0)
 var debugConnection, _ = connect("debug-log-topic", 0)
 var warnConnection, _ = connect("warn-log-topic", 0)
 var errorConnection, _ = connect("error-log-topic", 0)
 
-var logLevelToTopic = map[LogLevel]kafkaTopic{
-	Info: {
-		isEnabled:  false,
-		connection: infoConnection,
-	},
-	Debug: {
-		isEnabled:  false,
-		connection: debugConnection,
-	},
-	Warning: {
-		isEnabled:  false,
-		connection: warnConnection,
-	},
-	Error: {
-		isEnabled:  false,
-		connection: errorConnection,
-	},
+var connectionsByLogLevel = map[LogLevel]*kafka.Conn{
+	Info:    infoConnection,
+	Debug:   debugConnection,
+	Warning: warnConnection,
+	Error:   errorConnection,
 }
 
 // Sample messages with placeholders
@@ -65,124 +50,25 @@ var possibleMessages = []string{
 	"Service %s restarted",
 }
 
-var (
-	infoLogs  []string
-	debugLogs []string
-	warnLogs  []string
-	errorLogs []string
-
-	topicList        []string
-	topic            string
-	infoTopicInList  bool
-	debugTopicInList bool
-	warnTopicInList  bool
-	errorTopicInList bool
-)
-
-type messageEntry struct {
-	LogLevel string `json:"level"`
-	Message  string `json:"msg"`
-}
+// Log levels for sample logs
+var logLevels = []string{"INFO", "DEBUG", "ERROR", "WARN"}
 
 func main() {
-	//Generate 5 messages
-	messages := createRandomMessages(5)
-
-	//Convert message strings into messageEntries
-	var messageEntries []messageEntry
-	for _, msg := range messages {
-		newMessageEntry := new(messageEntry)
-		json.Unmarshal([]byte(msg), &newMessageEntry)
-		messageEntries = append(messageEntries, *newMessageEntry)
-	}
-
-	//Sort messageEntries by log level
-	sortEntries(messageEntries)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	partition := 0
-	//Connect to Kafka based on log level (topic)
-	//TODO Refactor with map enum[kafka-topic]
-	for _, topicName := range topicList {
-		topic = topicName + "-log-topic"
-		conn, err := connect(topic, partition)
-		if err != nil {
-			fmt.Print("Failed to connect")
-		}
-		defer conn.Close()
-		if topicName == "info" {
-			slog.With("amount", len(infoLogs)).Info("Sending logs to info topic")
-			writeMessages(conn, infoLogs)
-		}
-		if topicName == "debug" {
-			slog.With("amount", len(debugLogs)).Info("Sending logs to debug topic")
-			writeMessages(conn, debugLogs)
-		}
-		if topicName == "warn" {
-			slog.With("amount", len(warnLogs)).Info("Sending logs to warn topic")
-			writeMessages(conn, warnLogs)
-		}
-		if topicName == "error" {
-			slog.With("amount", len(errorLogs)).Info("Sending logs to error topic")
-			writeMessages(conn, errorLogs)
-		}
+	//Generate 5 messages
+	messages := createRandomMessages(5)
+
+	//Convert message into messageEntry and write to topic accordingly
+	for _, msg := range messages {
+		newMessageEntry := new(messageEntry)
+		json.Unmarshal([]byte(msg), &newMessageEntry)
+		writeMessageToTopic(LogLevel(newMessageEntry.LogLevel), msg)
 	}
 
 	<-ctx.Done()
 	slog.Info("Producer shutdown!")
-}
-
-// TODO Refactor with map enum[kafka-topic]
-func sortEntries(messageEntries []messageEntry) {
-	//Sort messageEntries by log level
-	for _, entry := range messageEntries {
-		switch entry.LogLevel {
-		case "INFO":
-			jsonEntry, err := json.Marshal(entry)
-			if err != nil {
-				slog.Error("Failed to get jsonEntry")
-			}
-			infoLogs = append(infoLogs, string(jsonEntry))
-			if !infoTopicInList {
-				topicList = append(topicList, "info")
-				infoTopicInList = true
-			}
-		case "DEBUG":
-			jsonEntry, err := json.Marshal(entry)
-			if err != nil {
-				slog.Error("Failed to get jsonEntry")
-			}
-			debugLogs = append(debugLogs, string(jsonEntry))
-			if !debugTopicInList {
-				topicList = append(topicList, "debug")
-				debugTopicInList = true
-			}
-		case "WARN":
-			jsonEntry, err := json.Marshal(entry)
-			if err != nil {
-				slog.Error("Failed to get jsonEntry")
-			}
-			warnLogs = append(warnLogs, string(jsonEntry))
-			if !warnTopicInList {
-				topicList = append(topicList, "warn")
-				warnTopicInList = true
-			}
-		case "ERROR":
-			jsonEntry, err := json.Marshal(entry)
-			if err != nil {
-				slog.Error("Failed to get jsonEntry")
-			}
-			errorLogs = append(errorLogs, string(jsonEntry))
-			if !errorTopicInList {
-				topicList = append(topicList, "error")
-				errorTopicInList = true
-			}
-		default:
-			slog.Error("Missmatching LogLevel")
-		}
-	}
 }
 
 func connect(topic string, partition int) (*kafka.Conn, error) {
@@ -195,11 +81,14 @@ func connect(topic string, partition int) (*kafka.Conn, error) {
 	return conn, err
 }
 
-func writeMessages(conn *kafka.Conn, msgs []string) {
+func writeMessageToTopic(logLevel LogLevel, msg string) {
+	conn := connectionsByLogLevel[logLevel]
+	var msgArray []string
+	msgArray = append(msgArray, msg)
 	var err error
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
-	for _, msg := range msgs {
+	for _, msg := range msgArray {
 		_, err = conn.WriteMessages(
 			kafka.Message{Value: []byte(msg)})
 	}
